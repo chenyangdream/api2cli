@@ -12,9 +12,11 @@ Generate a working Node.js CLI from any API, then wrap it in a Claude Code skill
 1. **Identify the API** -- user provides a docs URL, a live API base URL, or a peek-api capture
 2. **Discover endpoints** -- parse docs, probe the API, or read a peek-api catalog
 3. **Build endpoint catalog** -- normalize all discovered endpoints into a standard format
-4. **Generate CLI** -- scaffold Commander.js CLI from the catalog
+4. **Generate CLI** -- scaffold Commander.js CLI from the catalog, including a `package.json` with build/install scripts and a `README.md` runbook
 5. **User chooses destination** -- scaffold into current project or create standalone project
 6. **Generate skill** -- create a SKILL.md that teaches Claude how to use the generated CLI
+
+**The agent does not run `npm install`, `npm run build`, `npm link`, `bun compile`, or any install command during this workflow.** Build and install are documented in the generated `README.md` for the user to run themselves. Step 5's verification uses `npx tsx` against the source — no build step required.
 
 ## Step 1: Identify the API
 
@@ -139,32 +141,47 @@ Generate a dual-mode CLI using Commander.js. The CLI auto-detects human vs agent
 
 ### File Structure
 
-**In-project scaffold:**
+**In-project scaffold (self-contained mini-package nested in host repo):**
 ```
-scripts/
-  {service}.ts                    # Entry point with shebang
-  {service}/
+scripts/{service}/
+  package.json                    # mini-package — does NOT modify host's package.json
+  tsconfig.json
+  README.md                       # build & install runbook (user runs these themselves)
+  .gitignore                      # ignores node_modules/ and dist/
+  bin/
+    {service}.ts                  # source entry, #!/usr/bin/env npx tsx
+  src/
     lib/
       client.ts                   # API client (auth, pagination, retry, caching)
       envelope.ts                 # Agent JSON envelope helpers
     commands/
       {resource}.ts               # One file per resource group
+  dist/                           # tsc output, gitignored
+    bin/
+      {service}.js                # post-build, #!/usr/bin/env node prepended
 ```
 
 **Standalone project:**
 ```
 {service}-cli/
-  package.json
+  package.json                    # full package, bin field → dist/bin/{service}.js
   tsconfig.json
+  README.md                       # build & install runbook
+  .gitignore
   bin/
-    {service}.ts                  # Entry point with shebang
+    {service}.ts                  # source entry, #!/usr/bin/env npx tsx
   src/
     lib/
       client.ts
       envelope.ts
     commands/
       {resource}.ts
+  dist/                           # tsc output, gitignored
+    bin/
+      {service}.js                # post-build, #!/usr/bin/env node prepended
 ```
+
+Both layouts use **the same `package.json` script set** — `start` / `build` / `postbuild` / `install:local` / `install:bin` / `install:global` / `compile:*`. The in-project layout differs only in where it lives; users still `cd scripts/{service}/` and run npm/bun commands the same way they would in standalone.
 
 ### Code Generation Patterns
 
@@ -221,18 +238,27 @@ function respondError(command: string, message: string, code: string, fix: strin
 - Every command includes contextual `next_actions` for agent mode
 - Errors include `fix` suggestions
 
-**Standalone project extras:**
-- `package.json` with `commander`, `tsx` as dependencies, `bin` field pointing to entry
-- `tsconfig.json` for TypeScript
-- `.env.example` with the required env var
+**Project files (both layouts):**
+
+- `package.json` — `"type": "module"`, `bin` field points at `dist/bin/{service}.js`, scripts include `start` (tsx), `build` (tsc), `postbuild` (prepends `#!/usr/bin/env node` and `chmod +x`), `install:local` (`npm link`), `install:bin` (`bun build --compile` + `install -m 755 dist/{service} /usr/local/bin/{service}`), `install:global` (`npm install -g`), and `compile:*` cross-platform targets.
+- `tsconfig.json` — ES2022, strict, `outDir: dist`, includes `bin/**/*.ts` and `src/**/*.ts`.
+- `.gitignore` — `node_modules/`, `dist/`, `.env`.
+- `README.md` — **generated runbook documenting how to install** (npm registry, npm link, bun-compiled binary). The agent does not run any of these commands; the user does, after the agent finishes.
+- `.env.example` — the required env var name from `catalog.auth.envVar`.
+
+**Verbatim templates for `package.json`, `tsconfig.json`, and `README.md` are in `references/build-and-deploy.md`.** Copy them and substitute `{service}`, `{Service}`, `{description}`, `{ENV_VAR}`, `{primary-resource}`, and (optionally) `{scope}` / `{registry}`.
+
+**No host-project pollution (in-project layout):** the in-project scaffold lives entirely under `scripts/{service}/` as a self-contained mini-package with its own `package.json` and `node_modules`. The host repo's `package.json`, dependencies, and tsconfig are untouched.
 
 ## Step 5: Verify
 
-After generating the CLI:
+After generating the CLI, verify the **source** runs — do not run the build, install, or any npm/bun command. Step 5 only exercises `tsx` against the source.
 
-1. **Verify it runs:** Execute with no args, confirm the self-documenting root works
-2. **Test one endpoint:** Pick a simple GET endpoint, run it, verify output
-3. **Move on to Step 6** to wrap the CLI in a skill
+1. **Verify it runs:** `npx tsx bin/{service}.ts` with no args — confirm the self-documenting JSON tree prints.
+2. **Test one endpoint:** Pick a simple GET endpoint and run it through `tsx` (e.g. `npx tsx bin/{service}.ts {resource} list`). Confirm the output shape matches the catalog.
+3. Move on to Step 6.
+
+The user runs `npm install`, `npm run build`, and any install command (`install:local` / `install:bin` / `install:global`) themselves, following the generated `README.md`.
 
 ## Step 6: Generate Skill
 
@@ -263,9 +289,22 @@ CLI wrapper for the {Service} API.
 
 ## Setup
 
-Set the `{SERVICE_ENV_VAR}` environment variable:
+The CLI must be installed before use. See `{path/to/cli}/README.md` for the full install runbook — three options are documented:
+
+1. **npm registry** — `npm install -g {scope}{service}` (end users; requires the package is published)
+2. **`npm link`** — `cd {path/to/cli} && npm install && npm run build && npm run install:local` (developers iterating on the CLI)
+3. **Standalone binary** — `cd {path/to/cli} && npm run install:bin` (compiles via Bun and installs to `/usr/local/bin/{service}`; no Node needed at runtime)
+
+After install, set the `{ENV_VAR}` environment variable:
+
 \`\`\`bash
-export {SERVICE_ENV_VAR}=your-api-key-here
+export {ENV_VAR}=your-token-here
+\`\`\`
+
+Verify:
+
+\`\`\`bash
+{service}                      # prints self-documenting JSON command tree
 \`\`\`
 
 ## Commands
@@ -276,13 +315,13 @@ export {SERVICE_ENV_VAR}=your-api-key-here
 
 \`\`\`bash
 # List {resources}
-npx tsx {path/to/cli}.ts {resource} list
+{service} {resource} list
 
 # Get a specific {resource}
-npx tsx {path/to/cli}.ts {resource} get <id>
+{service} {resource} get <id>
 
 # Create a {resource}
-npx tsx {path/to/cli}.ts {resource} create --field value
+{service} {resource} create --field value
 \`\`\`
 
 ## Common Workflows
@@ -292,18 +331,34 @@ npx tsx {path/to/cli}.ts {resource} create --field value
 ### Example: {Workflow name}
 \`\`\`bash
 # Step 1: Find the customer
-npx tsx {path/to/cli}.ts customers list --status=active
+{service} customers list --status=active
 
 # Step 2: Get their invoices
-npx tsx {path/to/cli}.ts invoices list --customer-id=abc123
+{service} invoices list --customer-id=abc123
 \`\`\`
 
 ## Agent Usage
 
 When piped, all commands return JSON with `next_actions`:
+
 \`\`\`bash
-npx tsx {path/to/cli}.ts {resource} list | cat
+{service} {resource} list | cat
 \`\`\`
+
+## Development Mode
+
+If the CLI is not installed yet (or you're iterating on its source), run via `tsx` instead:
+
+\`\`\`bash
+cd {path/to/cli}
+npx tsx bin/{service}.ts {resource} list
+\`\`\`
+
+Output is identical to the installed binary in agent (piped) mode.
+
+## Uninstall
+
+See `{path/to/cli}/README.md` — the uninstall command depends on which install path was used (`npm uninstall -g`, `npm run uninstall:local`, or `npm run uninstall:bin`).
 ```
 
 ### Key Rules for Skill Generation
@@ -315,17 +370,25 @@ npx tsx {path/to/cli}.ts {resource} list | cat
 
 ### Tell the User
 
-After generating both the CLI and the skill:
+After generating the CLI, the README, and the skill, print this summary. **Do not run any of the commands** — list them so the user can run whichever install path fits.
 
 ```
-CLI generated at {cli_path}
-Skill generated at .claude/skills/{service}/SKILL.md
+CLI generated at:    {cli_path}
+README at:           {cli_path}/README.md   ← build & install runbook
+Skill generated at:  .claude/skills/{service}/SKILL.md
 
-To use the CLI directly:
-  npx tsx {cli_path}                           # See all commands
-  npx tsx {cli_path} customers list            # List customers
+Try the source directly (no install required):
+  cd {cli_path}
+  npm install                            # one-time, installs commander, tsx, typescript
+  npx tsx bin/{service}.ts               # see all commands
+  npx tsx bin/{service}.ts {resource} list
 
-Claude will now automatically use this skill when you ask about {service}.
+To install as a system command, see {cli_path}/README.md. Three options:
+  - npm registry:        npm install -g {scope}{service}
+  - npm link (dev):      npm run install:local
+  - Standalone binary:   npm run install:bin   (uses Bun, no Node needed at runtime)
+
+Claude will automatically use this skill when you ask about {service}.
 ```
 
 ## Reference Files
@@ -334,3 +397,4 @@ Claude will now automatically use this skill when you ask about {service}.
 - `references/api-client-template.md` -- Full API client class with pagination, retry, rate limiting, caching
 - `references/agent-first-patterns.md` -- Agent JSON envelope, HATEOAS, context-safe output, error handling
 - `references/commander-patterns.md` -- Commander.js subcommands, nested commands, interactive prompts, colored output, config files, testing
+- `references/build-and-deploy.md` -- Verbatim `package.json` / `tsconfig.json` / `README.md` templates, shebang prepend mechanics, three install modes (npm registry, npm link, bun-compiled binary), cross-platform compile targets
